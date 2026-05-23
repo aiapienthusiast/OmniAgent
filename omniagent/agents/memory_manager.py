@@ -440,8 +440,11 @@ class MemorySearchTool(Tool):
         super().__init__(
             name="memory_search",
             description=(
-                "Search memory for relevant information from MEMORY.md and memory/*.md. "
-                "Use this to recall prior work, decisions, user preferences, or project knowledge."
+                "Search long-term memory from MEMORY.md and memory/*.md. "
+                "Use this to recall cross-session prior work, decisions, user preferences, "
+                "or project knowledge. For facts from the current conversation, especially "
+                "references like just now, previous turn, above, 刚才, 上一轮, or 刚刚, "
+                "use the conversation history first instead of this tool."
             ),
         )
         self.manager = manager
@@ -481,7 +484,11 @@ class MemorySearchTool(Tool):
             if not results:
                 return ToolResult(
                     success=True,
-                    output="No relevant memories found.",
+                    output=(
+                        "No relevant long-term memories found. This does not mean the "
+                        "information is absent from the current conversation; check recent "
+                        "conversation history before answering."
+                    ),
                 )
 
             parts = []
