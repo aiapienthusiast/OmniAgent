@@ -534,7 +534,7 @@ class ReflexionAgent(Agent):
                 try:
                     ms = self._sentinel.get_current_milestone()
                     if ms:
-                        await self._sentinel.mark_milestone_completed(
+                        self._sentinel.mark_milestone_completed(
                             ms, result_summary=result.response[:200]
                         )
                 except Exception as e:
@@ -1952,7 +1952,7 @@ Do NOT write code or tool calls. Only provide the reflection."""
             if result.success:
                 return result.output
             else:
-                return f"Error: {result.error}"
+                return f"Error: {result.error or result.output or 'Tool failed'}"
 
         except Exception as e:
             logger.error("tool_execution_failed", tool=tool_name, error=str(e))

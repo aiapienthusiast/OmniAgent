@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 
-# System directories that are always blocked
+# System directories that are always blocked unless explicitly allowed below.
 _BLOCKED_PREFIXES = (
     Path("/etc"),
     Path("/var"),
@@ -17,6 +17,11 @@ _BLOCKED_PREFIXES = (
     Path("/proc"),
     Path("/sys"),
     Path("/dev"),
+)
+
+_ALLOWED_SYSTEM_WORKSPACE_PREFIXES = (
+    Path("/private/tmp"),
+    Path("/private/var/folders"),
 )
 
 
@@ -51,7 +56,28 @@ def safe_path(base_dir: Path, target_path: Path, allow_home: bool = False) -> Pa
 
     target_path = target_path.resolve()
 
-    # Always block system directories
+    # Check if target is within base_dir
+    try:
+        target_path.relative_to(base_dir)
+        for prefix in _BLOCKED_PREFIXES:
+            try:
+                target_path.relative_to(prefix)
+                for allowed_prefix in _ALLOWED_SYSTEM_WORKSPACE_PREFIXES:
+                    try:
+                        base_dir.relative_to(allowed_prefix)
+                        return target_path
+                    except ValueError:
+                        pass
+                raise PathTraversalError(
+                    f"Access denied: {target_path} is in a system directory"
+                )
+            except ValueError:
+                pass  # Not under this prefix — OK
+        return target_path
+    except ValueError:
+        pass
+
+    # Always block system directories outside the configured workspace.
     for prefix in _BLOCKED_PREFIXES:
         try:
             target_path.relative_to(prefix)
@@ -60,13 +86,6 @@ def safe_path(base_dir: Path, target_path: Path, allow_home: bool = False) -> Pa
             )
         except ValueError:
             pass  # Not under this prefix — OK
-
-    # Check if target is within base_dir
-    try:
-        target_path.relative_to(base_dir)
-        return target_path
-    except ValueError:
-        pass
 
     # If allow_home, also check home directory
     if allow_home:
