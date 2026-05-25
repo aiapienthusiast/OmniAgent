@@ -25,19 +25,29 @@ class SessionState(str, Enum):
 class Message:
     """Message in session history."""
 
-    role: str  # "user" or "assistant"
+    role: str  # "user", "assistant", or "tool"
     content: str
     timestamp: datetime = field(default_factory=datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
-        return {
+        data = {
             "role": self.role,
             "content": self.content,
             "timestamp": self.timestamp.isoformat(),
             "metadata": self.metadata,
         }
+        if self.tool_calls is not None:
+            data["tool_calls"] = self.tool_calls
+        if self.tool_call_id is not None:
+            data["tool_call_id"] = self.tool_call_id
+        if self.name is not None:
+            data["name"] = self.name
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Message":
@@ -47,6 +57,9 @@ class Message:
             content=data["content"],
             timestamp=datetime.fromisoformat(data["timestamp"]),
             metadata=data.get("metadata", {}),
+            tool_calls=data.get("tool_calls"),
+            tool_call_id=data.get("tool_call_id"),
+            name=data.get("name"),
         )
 
 
@@ -63,12 +76,25 @@ class Session:
     created_at: datetime = field(default_factory=datetime.now)
     last_active_at: datetime = field(default_factory=datetime.now)
 
-    def add_message(self, role: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    def add_message(
+        self,
+        role: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[datetime] = None,
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
+        tool_call_id: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
         """Add message to history."""
         message = Message(
             role=role,
             content=content,
+            timestamp=timestamp or datetime.now(),
             metadata=metadata or {},
+            tool_calls=tool_calls,
+            tool_call_id=tool_call_id,
+            name=name,
         )
         self.history.append(message)
         self.last_active_at = datetime.now()
@@ -332,7 +358,7 @@ class SessionManager:
         """Save session to disk."""
         file_path = self.storage_dir / f"{session.id}.json"
         with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(session.to_dict(), f, indent=2)
+            json.dump(session.to_dict(), f, ensure_ascii=False, indent=2)
 
     def _delete_session(self, session_id: str) -> None:
         """Delete session file."""
