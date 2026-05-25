@@ -1,11 +1,13 @@
 """Regression tests for TUI runtime reliability fixes."""
 
 import asyncio
+import json
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from omniagent.agents.sentinel import Milestone, SentinelAgent, TaskPlan
+from omniagent.agents.llm import LLMMessage
 from omniagent.cli.chat import ChatSession
 from omniagent.cli.main import main
 from omniagent.config.models import AgentConfig, OmniAgentConfig, SentinelConfig
@@ -87,6 +89,8 @@ def test_chat_session_filters_resume_by_work_dir(tmp_path: Path, monkeypatch) ->
     home.mkdir()
 
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("omniagent.cli.chat.Path.home", lambda: home)
+    monkeypatch.setattr("omniagent.cli.chat.setup_logging", lambda **kwargs: None)
     config = OmniAgentConfig()
     monkeypatch.setattr("omniagent.cli.chat.load_config", lambda: config)
 
@@ -103,6 +107,87 @@ def test_chat_session_filters_resume_by_work_dir(tmp_path: Path, monkeypatch) ->
     session.session_manager._save_session(other)
 
     assert session._find_recent_session().id == "current"
+
+
+def test_chat_session_persists_structured_history_and_diagnostics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    work_dir = tmp_path / "work"
+    home.mkdir()
+    work_dir.mkdir()
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("omniagent.cli.chat.Path.home", lambda: home)
+    monkeypatch.setattr("omniagent.cli.chat.setup_logging", lambda **kwargs: None)
+    config = OmniAgentConfig()
+    config.agent.model_provider = "custom"
+    config.agent.model_id = "test-model"
+    monkeypatch.setattr("omniagent.cli.chat.load_config", lambda: config)
+
+    chat_session = ChatSession(work_dir=work_dir)
+    session = chat_session.session_manager.create_session("cli_user", "chat", "structured")
+
+    class FakeAgent:
+        conversation_history = [
+            LLMMessage(
+                role="user",
+                content="检查中文",
+                timestamp="2026-05-25 10:00:00",
+            ),
+            LLMMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"README.md\"}",
+                        },
+                    }
+                ],
+                timestamp="2026-05-25 10:00:01",
+            ),
+            LLMMessage(
+                role="tool",
+                content="文件内容",
+                tool_call_id="call_1",
+                name="read_file",
+                timestamp="2026-05-25 10:00:02",
+            ),
+        ]
+
+        def get_session_diagnostics(self):
+            return {
+                "runtime": {"total_tool_calls": 1},
+                "sentinel": {"activated": False},
+            }
+
+    chat_session.agent = FakeAgent()
+    chat_session._last_result_metadata = {"iterations": 1}
+
+    chat_session._save_current_session(session)
+
+    saved_path = home / ".omniagent" / "sessions" / "structured.json"
+    raw = saved_path.read_text(encoding="utf-8")
+    data = json.loads(raw)
+
+    assert "检查中文" in raw
+    assert "\\u68c0" not in raw
+    assert data["history"][0]["timestamp"] == "2026-05-25T10:00:00"
+    assert data["history"][1]["tool_calls"][0]["id"] == "call_1"
+    assert data["history"][2]["tool_call_id"] == "call_1"
+    assert data["history"][2]["name"] == "read_file"
+    assert data["context"]["model_provider"] == "custom"
+    assert data["context"]["model_id"] == "test-model"
+    assert data["context"]["diagnostics"]["runtime"]["total_tool_calls"] == 1
+
+    restored = chat_session.session_manager.get_session("structured")
+    assert chat_session._restore_session(restored) is True
+    assert chat_session.agent.conversation_history[1].tool_calls[0]["id"] == "call_1"
+    assert chat_session.agent.conversation_history[2].tool_call_id == "call_1"
 
 
 def test_doctor_reports_active_custom_provider(tmp_path: Path) -> None:

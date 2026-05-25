@@ -396,6 +396,129 @@ class ReflexionAgent(Agent):
         """Get a copy of the conversation history."""
         return list(self.conversation_history)
 
+    def get_session_diagnostics(self) -> Dict[str, Any]:
+        """Build compact diagnostics for CLI/TUI session persistence."""
+        diagnostics: Dict[str, Any] = {
+            "runtime": {
+                "current_iteration": self.agent_state.iteration,
+                "total_tool_calls": self.agent_state.total_tool_calls,
+                "pending_tool_calls": list(self.agent_state.pending_tool_calls),
+                "parallel_batches": self._parallel_exec_count,
+                "parallel_tools": self._parallel_tools_count,
+                "compactions": self._compaction_count,
+                "stuck_detections": self._stuck_detected_count,
+                "error": self.agent_state.error,
+            },
+            "reflexion": {
+                "enabled": self.config.agent.reflexion_enabled,
+                "reflections_count": len(self._reflections),
+                "last_reflection": self._truncate(self._reflections[-1]) if self._reflections else "",
+            },
+            "compaction": {
+                "count": self._compaction_count,
+            },
+            "memory": self._build_memory_diagnostics(),
+            "evolution": self._build_evolution_diagnostics(),
+        }
+
+        if self._sentinel:
+            plan = getattr(self._sentinel, "_active_plan", None)
+            diagnostics["sentinel"] = {
+                "activated": self._sentinel_activated,
+                "active": self._sentinel.is_active,
+                "progress_summary": self._sentinel.get_progress_summary(),
+                "plan": plan.to_dict() if plan else None,
+            }
+
+        if self._guardian:
+            operations = []
+            for op in getattr(self._guardian, "_session_operations", [])[-50:]:
+                operations.append({
+                    "tool_name": op.tool_name,
+                    "params_summary": op.params_summary,
+                    "risk_level": op.risk_level,
+                    "had_issues": op.had_issues,
+                })
+            diagnostics["guardian"] = {
+                "summary": self._guardian.get_session_summary(),
+                "blocked_events": list(self._guardian_blocked_events),
+                "operations": operations,
+            }
+
+        if self.approval_manager:
+            recent_requests = sorted(
+                self.approval_manager.requests.values(),
+                key=lambda req: req.created_at,
+                reverse=True,
+            )[:50]
+            diagnostics["approval"] = {
+                "requests": [
+                    {
+                        "id": req.id,
+                        "action": req.action,
+                        "description": self._truncate(req.description),
+                        "risk_level": req.risk_level,
+                        "status": req.status.value if hasattr(req.status, "value") else str(req.status),
+                        "created_at": req.created_at.isoformat() if req.created_at else None,
+                        "decided_at": req.decided_at.isoformat() if req.decided_at else None,
+                    }
+                    for req in recent_requests
+                ],
+                "pending_count": len(self.approval_manager.get_pending_requests()),
+            }
+
+        return diagnostics
+
+    @staticmethod
+    def _truncate(value: str, limit: int = 1000) -> str:
+        """Keep diagnostics readable and bounded."""
+        if not value:
+            return ""
+        return value if len(value) <= limit else value[:limit] + "\n... [truncated]"
+
+    def _build_memory_diagnostics(self) -> Dict[str, Any]:
+        """Summarize memory tool usage from conversation history."""
+        searches = []
+        gets = []
+        for msg in self.conversation_history:
+            if msg.role != "assistant" or not msg.tool_calls:
+                continue
+            for tc in msg.tool_calls:
+                fn = tc.get("function", {})
+                name = fn.get("name")
+                if name not in {"memory_search", "memory_get"}:
+                    continue
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {"raw_arguments": fn.get("arguments")}
+                entry = {
+                    "call_id": tc.get("id"),
+                    "arguments": args,
+                }
+                if name == "memory_search":
+                    result = self._find_tool_result_for_call(tc.get("id", ""))
+                    if result:
+                        entry["result_preview"] = self._truncate(result, limit=500)
+                    searches.append(entry)
+                else:
+                    gets.append(entry)
+        return {
+            "enabled": self.memory_manager is not None,
+            "sync_on_session_start": self.config.memory.sync_on_session_start,
+            "searches": searches[-20:],
+            "gets": gets[-20:],
+        }
+
+    def _build_evolution_diagnostics(self) -> Dict[str, Any]:
+        """Summarize skill/context evolution outputs."""
+        diagnostics: Dict[str, Any] = {}
+        if self._skill_evolution:
+            diagnostics["skill"] = dict(self._skill_evolution.last_session_results)
+        if self._context_evolution:
+            diagnostics["context"] = dict(self._context_evolution.last_session_results)
+        return diagnostics
+
     def _build_tool_schemas(self) -> List[Dict[str, Any]]:
         """Build OpenAI-format tool schemas for all registered tools."""
         schemas = []
@@ -793,6 +916,7 @@ class ReflexionAgent(Agent):
                                 content=f"Error: Tool '{tool_name}' is not available. Available tools: {list(self.tools.keys())}",
                                 tool_call_id=tool_call_id,
                                 name=tool_name,
+                                timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             )
                             messages.append(error_msg)
                             self.conversation_history.append(error_msg)
@@ -1337,6 +1461,7 @@ Citations: include Source: <path#line> when it helps the user verify memory snip
             content=result_content,
             tool_call_id=tool_call_id,
             name=tool_name,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
 
     async def _guarded_execute(self, action: Dict[str, Any]) -> str:
@@ -1706,7 +1831,11 @@ Do NOT write code or tool calls. Only provide the reflection."""
         merges into the previous user message when the last message is also
         user role, avoiding the error.
         """
-        msg = LLMMessage(role="user", content=content)
+        msg = LLMMessage(
+            role="user",
+            content=content,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
 
         if messages and messages[-1].role == "user":
             prev = messages[-1]
@@ -1742,6 +1871,7 @@ Do NOT write code or tool calls. Only provide the reflection."""
                 self.conversation_history[i] = LLMMessage(
                     role=msg.role, content=truncated,
                     tool_call_id=msg.tool_call_id, name=msg.name,
+                    timestamp=msg.timestamp,
                 )
 
     def _extract_file_content_summary(self, file_path: str) -> str:

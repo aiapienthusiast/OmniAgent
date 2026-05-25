@@ -47,6 +47,7 @@ class ChatSession:
             if provider_cfg.api_url:
                 self.config.agent.api_url = provider_cfg.api_url
         self.session_id: Optional[str] = None
+        self._last_result_metadata = {}
 
         # Logging: file always enabled, console controlled by --verbose
         from datetime import date
@@ -202,6 +203,7 @@ class ChatSession:
                     # Send to agent
                     console.print(f"[dim]{query_time}[/dim] [dim]Thinking...[/dim]")
                     result = await self.agent.execute(user_input)
+                    self._last_result_metadata = result.metadata or {}
 
                     # Sync to session
                     self._save_current_session(session)
@@ -349,12 +351,37 @@ class ChatSession:
         # Sync conversation_history to session history
         session.history = []
         session.context["work_dir"] = str(self.work_dir.resolve())
+        session.context["model_provider"] = self.config.agent.model_provider
+        session.context["model_id"] = self.config.agent.model_id
+        if self._last_result_metadata:
+            session.context["last_result_metadata"] = self._last_result_metadata
+        if hasattr(self.agent, "get_session_diagnostics"):
+            session.context["diagnostics"] = self.agent.get_session_diagnostics()
         for msg in self.agent.conversation_history:
             session.add_message(
                 role=msg.role,
-                content=msg.content,
+                content=msg.content or "",
+                timestamp=self._parse_message_timestamp(msg.timestamp),
+                tool_calls=msg.tool_calls,
+                tool_call_id=msg.tool_call_id,
+                name=msg.name,
             )
         self.session_manager._save_session(session)
+
+    @staticmethod
+    def _parse_message_timestamp(timestamp: Optional[str]):
+        """Parse an LLMMessage timestamp when available."""
+        if not timestamp:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S",):
+            try:
+                return datetime.strptime(timestamp, fmt)
+            except ValueError:
+                pass
+        try:
+            return datetime.fromisoformat(timestamp)
+        except ValueError:
+            return None
 
     def _find_recent_session(self):
         """Find the most recent active session from this working directory."""
@@ -382,7 +409,14 @@ class ChatSession:
         if not self.agent or not session.history:
             return False
         self.agent.conversation_history = [
-            LLMMessage(role=msg.role, content=msg.content)
+            LLMMessage(
+                role=msg.role,
+                content=msg.content,
+                tool_calls=msg.tool_calls,
+                tool_call_id=msg.tool_call_id,
+                name=msg.name,
+                timestamp=msg.timestamp.isoformat(),
+            )
             for msg in session.history
         ]
         self.session_manager.resume_session(session.id)
