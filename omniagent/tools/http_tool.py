@@ -1,48 +1,16 @@
 """HTTP tool for making arbitrary HTTP requests."""
 
-import ipaddress
-import socket
 import aiohttp
-from typing import Any, Dict, Optional
-from urllib.parse import urlparse
+from typing import Any, Dict
 
 from .base import Tool, ToolResult
-
-
-# Private/internal IP ranges that should be blocked
-_BLOCKED_NETWORKS = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
-]
-
-
-def _is_private_url(url: str) -> bool:
-    """Check if a URL points to a private/internal network (SSRF prevention)."""
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-
-        # Resolve hostname to IP
-        try:
-            ip = socket.gethostbyname(hostname)
-            ip_obj = ipaddress.ip_address(ip)
-            return any(ip_obj in net for net in _BLOCKED_NETWORKS)
-        except (socket.gaierror, ValueError):
-            return False
-    except Exception:
-        return False
+from .url_security import URLSecurityError, validate_public_http_url, validate_redirect_url
 
 
 class HttpTool(Tool):
     """Make HTTP requests."""
+
+    MAX_REDIRECTS = 5
 
     def __init__(self, work_dir=None):
         super().__init__(
@@ -90,50 +58,73 @@ class HttpTool(Tool):
         if not url:
             return ToolResult(success=False, output="", error="Missing required parameter: url")
 
-        # Basic URL validation
-        if not url.startswith(("http://", "https://")):
-            return ToolResult(success=False, output="", error="URL must start with http:// or https://")
-
-        # SSRF check
-        if _is_private_url(url):
+        try:
+            validate_public_http_url(url)
+        except URLSecurityError as e:
             return ToolResult(
                 success=False,
                 output="",
-                error=f"URL points to a private/internal network (SSRF protection): {url}",
+                error=str(e),
             )
 
         try:
             timeout = aiohttp.ClientTimeout(total=timeout)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                kwargs: Dict[str, Any] = {"headers": headers}
-                if body and method in ("POST", "PUT", "PATCH"):
-                    kwargs["data"] = body
+                request_url = url
+                request_method = method
+                for redirect_count in range(self.MAX_REDIRECTS + 1):
+                    kwargs: Dict[str, Any] = {"headers": headers, "allow_redirects": False}
+                    if body and request_method in ("POST", "PUT", "PATCH"):
+                        kwargs["data"] = body
 
-                async with session.request(method, url, **kwargs) as resp:
-                    response_body = await resp.text()
-                    status = resp.status
+                    async with session.request(request_method, request_url, **kwargs) as resp:
+                        if resp.status in (301, 302, 303, 307, 308):
+                            location = resp.headers.get("Location", "")
+                            if redirect_count >= self.MAX_REDIRECTS:
+                                return ToolResult(
+                                    success=False,
+                                    output="",
+                                    error=f"Too many redirects while requesting: {url}",
+                                )
+                            try:
+                                request_url = validate_redirect_url(str(resp.url), location)
+                            except URLSecurityError as e:
+                                return ToolResult(success=False, output="", error=str(e))
+                            if resp.status == 303 and request_method not in ("GET", "HEAD"):
+                                request_method = "GET"
+                            continue
 
-                    # Truncate large responses
-                    max_chars = 50000
-                    if len(response_body) > max_chars:
-                        response_body = response_body[:max_chars] + "\n... [truncated]"
+                        response_body = await resp.text()
+                        status = resp.status
 
-                    output_parts = [
-                        f"HTTP {method} {url}",
-                        f"Status: {status} {resp.reason}",
-                        f"Headers: {dict(resp.headers)}",
-                    ]
-                    if response_body:
-                        output_parts.append(f"\nBody:\n{response_body}")
+                        # Truncate large responses
+                        max_chars = 50000
+                        if len(response_body) > max_chars:
+                            response_body = response_body[:max_chars] + "\n... [truncated]"
 
-                    return ToolResult(
-                        success=status < 400,
-                        output="\n".join(output_parts),
-                        metadata={
-                            "status": status,
-                            "content_type": resp.headers.get("Content-Type", ""),
-                        },
-                    )
+                        output_parts = [
+                            f"HTTP {request_method} {request_url}",
+                            f"Status: {status} {resp.reason}",
+                            f"Headers: {dict(resp.headers)}",
+                        ]
+                        if response_body:
+                            output_parts.append(f"\nBody:\n{response_body}")
+
+                        return ToolResult(
+                            success=status < 400,
+                            output="\n".join(output_parts),
+                            metadata={
+                                "status": status,
+                                "content_type": resp.headers.get("Content-Type", ""),
+                                "final_url": str(resp.url),
+                            },
+                        )
+
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"Too many redirects while requesting: {url}",
+                )
 
         except aiohttp.ClientError as e:
             return ToolResult(success=False, output="", error=f"HTTP client error: {e}")

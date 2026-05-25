@@ -5,12 +5,12 @@ import json
 import os
 from html.parser import HTMLParser
 from typing import Any, Dict
-from urllib.parse import urlparse
 
 import aiohttp
 
 from omniagent.infra import get_logger
 from .base import Tool, ToolResult
+from .url_security import URLSecurityError, validate_public_http_url, validate_redirect_url
 
 logger = get_logger(__name__)
 
@@ -59,6 +59,7 @@ class WebFetchTool(Tool):
     """Fetch content from a URL."""
 
     MAX_CONTENT_LENGTH = 100_000
+    MAX_REDIRECTS = 5
 
     def __init__(self, timeout: int = 30):
         super().__init__(
@@ -78,9 +79,10 @@ class WebFetchTool(Tool):
             if not url:
                 return ToolResult(success=False, output="", error="Missing required parameter: url")
 
-            parsed = urlparse(url)
-            if not parsed.scheme or not parsed.netloc:
-                return ToolResult(success=False, output="", error=f"Invalid URL: {url}")
+            try:
+                validate_public_http_url(url)
+            except URLSecurityError as e:
+                return ToolResult(success=False, output="", error=str(e))
 
             logger.info("web_fetch", url=url)
 
@@ -89,43 +91,78 @@ class WebFetchTool(Tool):
                     "User-Agent": "OmniAgent/0.1 (AI Agent)",
                     "Accept": "text/html,application/json,text/plain,*/*",
                 }
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        return ToolResult(
-                            success=False,
-                            output="",
-                            error=f"HTTP {resp.status}: {error_text[:200]}",
+                request_url = url
+                for redirect_count in range(self.MAX_REDIRECTS + 1):
+                    async with session.get(request_url, headers=headers, allow_redirects=False) as resp:
+                        if resp.status in (301, 302, 303, 307, 308):
+                            location = resp.headers.get("Location", "")
+                            if redirect_count >= self.MAX_REDIRECTS:
+                                return ToolResult(
+                                    success=False,
+                                    output="",
+                                    error=f"Too many redirects while fetching: {url}",
+                                )
+                            try:
+                                request_url = validate_redirect_url(str(resp.url), location)
+                            except URLSecurityError as e:
+                                return ToolResult(success=False, output="", error=str(e))
+                            continue
+
+                        if resp.status != 200:
+                            error_text = await resp.text()
+                            return ToolResult(
+                                success=False,
+                                output="",
+                                error=f"HTTP {resp.status}: {error_text[:200]}",
+                            )
+
+                        content_type = resp.headers.get("Content-Type", "")
+
+                        if "application/json" in content_type:
+                            raw = await resp.text()
+                            # Try to pretty-print JSON
+                            try:
+                                parsed_json = json.loads(raw)
+                                text = json.dumps(parsed_json, indent=2, ensure_ascii=False)
+                            except json.JSONDecodeError:
+                                text = raw
+                        else:
+                            # HTML or text
+                            raw = await resp.text()
+                            if "text/html" in content_type:
+                                text = html_to_text(raw)
+                            else:
+                                text = raw
+
+                        if len(text) > self.MAX_CONTENT_LENGTH:
+                            text = (
+                                text[:self.MAX_CONTENT_LENGTH]
+                                + f"\n\n[Content truncated at {self.MAX_CONTENT_LENGTH} characters]"
+                            )
+
+                        logger.info(
+                            "web_fetch_success",
+                            url=url,
+                            final_url=str(resp.url),
+                            content_length=len(text),
                         )
 
-                    content_type = resp.headers.get("Content-Type", "")
+                        return ToolResult(
+                            success=True,
+                            output=text,
+                            metadata={
+                                "url": url,
+                                "final_url": str(resp.url),
+                                "content_type": content_type,
+                                "length": len(text),
+                            },
+                        )
 
-                    if "application/json" in content_type:
-                        raw = await resp.text()
-                        # Try to pretty-print JSON
-                        try:
-                            parsed_json = json.loads(raw)
-                            text = json.dumps(parsed_json, indent=2, ensure_ascii=False)
-                        except json.JSONDecodeError:
-                            text = raw
-                    else:
-                        # HTML or text
-                        raw = await resp.text()
-                        if "text/html" in content_type:
-                            text = html_to_text(raw)
-                        else:
-                            text = raw
-
-                    if len(text) > self.MAX_CONTENT_LENGTH:
-                        text = text[:self.MAX_CONTENT_LENGTH] + f"\n\n[Content truncated at {self.MAX_CONTENT_LENGTH} characters]"
-
-                    logger.info("web_fetch_success", url=url, content_length=len(text))
-
-                    return ToolResult(
-                        success=True,
-                        output=text,
-                        metadata={"url": url, "content_type": content_type, "length": len(text)},
-                    )
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"Too many redirects while fetching: {url}",
+                )
 
         except asyncio.TimeoutError:
             return ToolResult(success=False, output="", error=f"Request timed out after {self.timeout}s")
