@@ -12,6 +12,16 @@ from omniagent.infra import get_logger
 logger = get_logger(__name__)
 
 
+def normalize_openai_chat_completions_url(api_url: str) -> str:
+    """Return the chat completions endpoint for an OpenAI-compatible URL."""
+    normalized_url = api_url.strip().rstrip("/") if api_url else ""
+    if not normalized_url:
+        raise ValueError("OpenAI-compatible api_url must not be empty")
+    if normalized_url.endswith("/chat/completions"):
+        return normalized_url
+    return f"{normalized_url}/chat/completions"
+
+
 @dataclass
 class LLMMessage:
     """LLM message."""
@@ -158,13 +168,16 @@ class DeepSeekLLMProvider(LLMProvider):
         api_key: str,
         model: str = "deepseek-chat",
     ):
-        self.api_url = api_url
+        self.base_url = api_url
+        self.chat_completions_url = normalize_openai_chat_completions_url(api_url)
+        self.api_url = self.chat_completions_url
         self.api_key = api_key
         self.model = model
 
         logger.info(
             "deepseek_llm_initialized",
             api_url=api_url,
+            chat_completions_url=self.chat_completions_url,
             model=model,
         )
 
@@ -234,7 +247,7 @@ class DeepSeekLLMProvider(LLMProvider):
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                self.api_url,
+                self.chat_completions_url,
                 json=payload,
                 headers=headers,
             ) as resp:
@@ -315,7 +328,7 @@ class DeepSeekLLMProvider(LLMProvider):
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                self.api_url,
+                self.chat_completions_url,
                 json=payload,
                 headers=headers,
             ) as resp:
@@ -967,13 +980,12 @@ class OpenRouterLLMProvider(OpenAILLMProvider):
     DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
     def __init__(self, api_key: str, model: str = "openai/gpt-4o", api_url: str = None):
+        base_url = api_url or self.DEFAULT_BASE_URL
         super().__init__(
             api_key=api_key,
             model=model,
-            api_url=api_url or self.DEFAULT_BASE_URL,
+            api_url=base_url,
         )
-        # Override the base URL for OpenRouter
-        self.base_url = self.DEFAULT_BASE_URL
         logger.info("openrouter_llm_initialized", model=model, base_url=self.base_url)
 
 
@@ -1103,7 +1115,11 @@ def create_llm_provider(
     provider = provider.lower()
 
     if provider == "deepseek":
-        return DeepSeekLLMProvider(api_key=api_key, model=model or "deepseek-chat", api_url=api_url or "https://api.deepseek.com/v1")
+        return DeepSeekLLMProvider(
+            api_key=api_key,
+            model=model or "deepseek-chat",
+            api_url=api_url or "https://api.deepseek.com",
+        )
     elif provider == "openai":
         return OpenAILLMProvider(api_key=api_key, model=model or "gpt-4o", api_url=api_url)
     elif provider == "anthropic":
