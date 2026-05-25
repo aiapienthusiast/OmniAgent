@@ -143,9 +143,15 @@ class BashTool(Tool):
                     exit_code=process.returncode,
                 )
 
+            output_text = output.strip()
+            error_text = None
+            if not success:
+                error_text = output_text or f"Command exited with code {process.returncode}"
+
             return ToolResult(
                 success=success,
-                output=output.strip(),
+                output=output_text,
+                error=error_text,
                 metadata={
                     "exit_code": process.returncode,
                     "command": command,

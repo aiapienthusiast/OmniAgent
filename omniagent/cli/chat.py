@@ -125,15 +125,8 @@ class ChatSession:
             console.print(f"[red]✗[/red] Failed to initialize agent: {e}")
             return
 
-        # Create or resume session
-        self.session_id = str(__import__("uuid").uuid4())[:8]
-        session = self.session_manager.create_session(
-            user_id="cli_user",
-            channel_id="chat",
-            session_id=self.session_id,
-        )
-
-        # Check for recent session to resume
+        # Check for recent session to resume before creating a new one.
+        session = None
         recent = self._find_recent_session()
         if recent:
             loaded = self._restore_session(recent)
@@ -144,6 +137,16 @@ class ChatSession:
                     f"[dim]Resumed session {recent.id} "
                     f"({len(self.agent.conversation_history)} messages)[/dim]\n"
                 )
+
+        if session is None:
+            self.session_id = str(__import__("uuid").uuid4())[:8]
+            session = self.session_manager.create_session(
+                user_id="cli_user",
+                channel_id="chat",
+                session_id=self.session_id,
+            )
+            session.context["work_dir"] = str(self.work_dir.resolve())
+            self.session_manager._save_session(session)
 
         try:
             # Chat loop
@@ -345,6 +348,7 @@ class ChatSession:
             return
         # Sync conversation_history to session history
         session.history = []
+        session.context["work_dir"] = str(self.work_dir.resolve())
         for msg in self.agent.conversation_history:
             session.add_message(
                 role=msg.role,
@@ -358,10 +362,14 @@ class ChatSession:
             user_id="cli_user",
             channel_id="chat",
         )
+        current_work_dir = str(self.work_dir.resolve())
         # Filter to recent (within timeout) active sessions
         active = [
             s for s in sessions
-            if not s.is_expired(self.session_manager.session_timeout)
+            if (
+                not s.is_expired(self.session_manager.session_timeout)
+                and s.context.get("work_dir") == current_work_dir
+            )
         ]
         if not active:
             return None
@@ -386,6 +394,11 @@ class ChatSession:
             user_id="cli_user",
             channel_id="chat",
         )
+        current_work_dir = str(self.work_dir.resolve())
+        sessions = [
+            s for s in sessions
+            if s.context.get("work_dir") == current_work_dir
+        ]
         if not sessions:
             console.print("[dim]No sessions found.[/dim]")
             return

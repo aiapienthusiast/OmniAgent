@@ -347,7 +347,31 @@ def doctor(ctx: click.Context) -> None:
     config_obj = ctx.obj["config"]
     click.echo(f"Config loaded: ✓")
 
-    # Check API keys
+    provider_name = config_obj.agent.model_provider
+    provider_cfg = (config_obj.providers or {}).get(provider_name)
+    model_id = (
+        provider_cfg.model_id
+        if provider_cfg and provider_cfg.model_id
+        else config_obj.agent.model_id
+    )
+    api_url = (
+        config_obj.agent.api_url
+        or (provider_cfg.api_url if provider_cfg and provider_cfg.api_url else None)
+    )
+    provider_key = provider_cfg.api_key if provider_cfg and provider_cfg.api_key else None
+    active_key = (
+        provider_key
+        or config_obj.api_key
+        or (config_obj.openai_api_key if provider_name == "openai" else None)
+        or (config_obj.anthropic_api_key if provider_name == "anthropic" else None)
+    )
+
+    click.echo(f"Active provider: {provider_name}")
+    click.echo(f"Active model: {model_id}")
+    click.echo(f"Active API URL: {api_url or '(default)'}")
+    click.echo(f"Active provider API key: {'✓' if active_key else '✗ (not configured)'}")
+
+    # Check legacy compatibility keys
     if config_obj.openai_api_key:
         click.echo("OpenAI API key: ✓")
     else:
