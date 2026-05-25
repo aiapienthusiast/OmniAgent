@@ -308,7 +308,7 @@ async def get_health(request: web.Request) -> web.Response:
             "model_id": ctx.agent.config.agent.model_id if ctx.agent.config else "unknown",
             "is_streaming": agent_state.is_streaming,
             "current_iteration": agent_state.iteration,
-            "pending_tool_calls": agent_state.pending_tool_calls,
+            "pending_tool_calls": list(agent_state.pending_tool_calls),
             "total_tool_calls": agent_state.total_tool_calls,
             "error": agent_state.error,
         }
