@@ -1092,9 +1092,14 @@ When asked about configuration or implementation details, use read_file to check
         if self.memory_manager:
             fixed += """
 ## Memory Recall
-Before answering anything about prior work, decisions, dates, people, preferences,
-or todos: run memory_search on MEMORY.md + memory/*.md; then use memory_get to
-pull only the needed lines. If low confidence after search, say you checked.
+Current conversation history is the highest-priority source for short-term references
+such as "just now", "previous turn", "above", "刚才", "上一轮", or "刚刚".
+Answer those from the recent conversation before using memory_search.
+
+Use memory_search for long-term or cross-session recall: prior work, decisions, dates,
+people, preferences, todos, or project knowledge stored in MEMORY.md + memory/*.md.
+Then use memory_get to pull only the needed lines. If memory_search has no results,
+do not conclude the user never mentioned it; first check the current conversation.
 Citations: include Source: <path#line> when it helps the user verify memory snippets.
 """
 

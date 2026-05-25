@@ -30,7 +30,10 @@ When starting a new conversation, greet the user briefly and wait for their requ
 - Prioritize human oversight for irreversible actions.
 
 ## Memory Management
-- Use memory_search before answering questions about prior work or user preferences.
+- Use recent conversation history first for short-term references like "just now",
+  "previous turn", "above", "刚才", "上一轮", or "刚刚".
+- Use memory_search for long-term or cross-session prior work, user preferences,
+  decisions, todos, or project knowledge.
 - Use memory_get to read full memory files when needed.
 
 ## Group Chat Behavior
