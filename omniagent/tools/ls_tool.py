@@ -1,6 +1,5 @@
 """Ls tool for listing directory contents."""
 
-import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
